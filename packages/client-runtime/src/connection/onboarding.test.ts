@@ -236,44 +236,63 @@ describe("connection onboarding", () => {
     }),
   );
 
-  it.effect("editing keeps the saved alternates and drops the one that became preferred", () =>
-    Effect.gen(function* () {
-      const environmentId = EnvironmentId.make("environment-paired");
-      const entry = Option.some({
-        target: new BearerConnectionTarget({
-          environmentId,
-          label: "Saved",
-          connectionId: "bearer:environment-paired",
-        }),
-        profile: Option.some(
-          new BearerConnectionProfile({
-            connectionId: "bearer:environment-paired",
+  it.effect(
+    "keeps saved routes when editing without touching them and drops the preferred duplicate",
+    () =>
+      Effect.gen(function* () {
+        const environmentId = EnvironmentId.make("environment-paired");
+        const entry = Option.some({
+          target: new BearerConnectionTarget({
             environmentId,
             label: "Saved",
-            httpBaseUrl: "http://lan.example.test/",
-            wsBaseUrl: "ws://lan.example.test/",
-            alternateHttpBaseUrls: ["https://tailnet.example.test/"],
+            connectionId: "bearer:environment-paired",
           }),
-        ),
-        enabled: true,
-      });
-      const credential = Option.some(new BearerConnectionCredential({ token: "bearer-token" }));
+          profile: Option.some(
+            new BearerConnectionProfile({
+              connectionId: "bearer:environment-paired",
+              environmentId,
+              label: "Saved",
+              httpBaseUrl: "http://lan.example.test/",
+              wsBaseUrl: "ws://lan.example.test/",
+              alternateHttpBaseUrls: ["https://tailnet.example.test/"],
+              pinnedRoute: true,
+            }),
+          ),
+          enabled: true,
+        });
+        const credential = Option.some(new BearerConnectionCredential({ token: "bearer-token" }));
 
-      const relabeled = yield* prepareBearerConnectionUpdate({
-        input: { environmentId, label: "Renamed", httpBaseUrl: "http://lan.example.test" },
-        entry,
-        credential,
-      });
-      expect(relabeled.profile.alternateHttpBaseUrls).toEqual(["https://tailnet.example.test/"]);
+        const untouched = yield* prepareBearerConnectionUpdate({
+          input: { environmentId, label: "Saved", httpBaseUrl: "http://lan.example.test" },
+          entry,
+          credential,
+        });
+        expect(untouched.profile).toMatchObject({
+          alternateHttpBaseUrls: ["https://tailnet.example.test/"],
+          pinnedRoute: true,
+        });
 
-      const swapped = yield* prepareBearerConnectionUpdate({
-        input: { environmentId, label: "Saved", httpBaseUrl: "https://tailnet.example.test" },
-        entry,
-        credential,
-      });
-      expect(swapped.profile.httpBaseUrl).toBe("https://tailnet.example.test/");
-      expect(swapped.profile.alternateHttpBaseUrls).toBeUndefined();
-    }),
+        const swapped = yield* prepareBearerConnectionUpdate({
+          input: {
+            environmentId,
+            label: "Saved",
+            httpBaseUrl: "https://tailnet.example.test",
+            alternateHttpBaseUrls: [
+              "http://lan.example.test/",
+              "wss://tailnet.example.test/ws",
+              "http://lan.example.test",
+            ],
+            pinnedRoute: false,
+          },
+          entry,
+          credential,
+        });
+        expect(swapped.profile).toMatchObject({
+          httpBaseUrl: "https://tailnet.example.test/",
+          alternateHttpBaseUrls: ["http://lan.example.test/"],
+          pinnedRoute: false,
+        });
+      }),
   );
 
   it.effect("re-pairing a saved environment keeps its previous address as an alternate route", () =>
@@ -302,6 +321,20 @@ describe("connection onboarding", () => {
         alternateHttpBaseUrls: ["http://lan.example.test/"],
       });
       expect(mergeBearerRoutes(paired, Option.none())).toBe(paired);
+
+      // Re-pairing at the preferred address with nothing else saved still keeps the pin.
+      const pinnedOnly = new BearerConnectionProfile({
+        ...previousProfile,
+        httpBaseUrl: "https://tailnet.example.test/",
+        alternateHttpBaseUrls: [],
+        pinnedRoute: true,
+      });
+      const merged = mergeBearerRoutes(
+        paired,
+        Option.some({ target: paired.target, profile: Option.some(pinnedOnly), enabled: true }),
+      ).profile;
+      expect(merged.pinnedRoute).toBe(true);
+      expect(merged.alternateHttpBaseUrls).toBeUndefined();
     }),
   );
 

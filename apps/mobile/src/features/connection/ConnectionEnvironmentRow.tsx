@@ -1,12 +1,14 @@
 import { ConnectionTraceId } from "./ConnectionTraceId";
 import { SymbolView } from "../../components/AppSymbol";
 import { connectionStatusText } from "@t3tools/client-runtime/connection";
+import { type RouteProbeResult, routeProbeLabel } from "@t3tools/client-runtime/environment";
 import type { AtomCommandResult } from "@t3tools/client-runtime/state/runtime";
 import { type EnvironmentId, resolveEnvironmentMachineKind } from "@t3tools/contracts";
 import { useAtomValue } from "@effect/atom-react";
 import * as Cause from "effect/Cause";
+import * as Option from "effect/Option";
 import { AsyncResult } from "effect/unstable/reactivity";
-import { useCallback, useState } from "react";
+import { useCallback, useEffect, useMemo, useState } from "react";
 import { Platform, Alert, Pressable, View } from "react-native";
 import Animated, { FadeIn, FadeOut, LinearTransition } from "react-native-reanimated";
 
@@ -16,8 +18,15 @@ import { MaterialButton } from "../../components/MaterialButton";
 import { MaterialIconButton } from "../../components/MaterialIconButton";
 import { ThemedSwitch } from "../../components/ThemedSwitch";
 import { cn } from "../../lib/cn";
-import type { ConnectedEnvironmentSummary } from "../../state/remote-runtime-types";
+import type {
+  ConnectedEnvironmentSummary,
+  EnvironmentUpdateInput,
+} from "../../state/remote-runtime-types";
+import { environmentCatalog } from "../../connection/catalog";
+import { probeRoute } from "../../connection/onboarding";
+import { useAtomCommand } from "../../state/use-atom-command";
 import { serverEnvironment } from "../../state/server";
+import { usePreparedConnection } from "../../state/session";
 import { ConnectionFormField } from "./ConnectionFormField";
 import { ConnectionStatusDot } from "./ConnectionStatusDot";
 
@@ -32,6 +41,116 @@ function connectionStatusLabel(environment: ConnectedEnvironmentSummary): string
   });
 }
 
+const PROBE_DEBOUNCE_MS = 500;
+
+// Row keys survive removal so a deleted row does not re-key the ones after it.
+let nextRouteId = 0;
+const newRoute = (url: string) => ({ id: nextRouteId++, url });
+
+/** Probes an address from this device as the user types, debounced. */
+function useRouteProbe(url: string, environmentId: EnvironmentId) {
+  const probe = useAtomCommand(probeRoute, { reportFailure: false, reportDefect: false });
+  // The result is tagged with the URL it answers for, so a stale answer for an
+  // earlier value never shows against the current one.
+  const [probed, setProbed] = useState<{ url: string; result: RouteProbeResult } | null>(null);
+  useEffect(() => {
+    if (url.trim() === "") return;
+    let stale = false;
+    const timer = setTimeout(() => {
+      void probe({ httpBaseUrl: url, expectedEnvironmentId: environmentId }).then((outcome) => {
+        if (!stale && outcome._tag === "Success") setProbed({ url, result: outcome.value });
+      });
+    }, PROBE_DEBOUNCE_MS);
+    return () => {
+      stale = true;
+      clearTimeout(timer);
+    };
+  }, [url, environmentId, probe]);
+  return probed?.url === url ? probed.result : null;
+}
+
+function RouteField(props: {
+  readonly url: string;
+  readonly environmentId: EnvironmentId;
+  readonly preferred: boolean;
+  readonly removable: boolean;
+  readonly onChange: (url: string) => void;
+  readonly onRemove: () => void;
+}) {
+  const probe = useRouteProbe(props.url, props.environmentId);
+  const empty = props.url.trim() === "";
+  return (
+    <View className="gap-1">
+      <View className="flex-row items-end gap-2">
+        <View className="flex-1">
+          <ConnectionFormField
+            label={props.preferred ? "Preferred URL" : "Other URL"}
+            autoCapitalize="none"
+            autoCorrect={false}
+            keyboardType="url"
+            placeholder="https://machine.tailnet.ts.net"
+            value={props.url}
+            onChangeText={props.onChange}
+          />
+        </View>
+        {Platform.OS === "android" ? (
+          <MaterialIconButton
+            accessibilityLabel="Remove URL"
+            icon="trash"
+            variant="tonal"
+            disabled={!props.removable}
+            onPress={props.onRemove}
+          />
+        ) : (
+          <Pressable
+            accessibilityLabel="Remove URL"
+            className="h-[42px] w-[42px] items-center justify-center rounded-[14px] border border-input-border bg-input active:opacity-70 disabled:opacity-40"
+            disabled={!props.removable}
+            onPress={props.onRemove}
+          >
+            <SymbolView
+              name="trash"
+              size={14}
+              tintColorClassName="accent-icon-subtle"
+              type="monochrome"
+            />
+          </Pressable>
+        )}
+      </View>
+      {empty ? null : (
+        <Text
+          className={cn(
+            "text-xs",
+            probe?.status === "reachable"
+              ? "text-foreground-muted"
+              : probe === null
+                ? "text-foreground-muted"
+                : "text-danger-foreground",
+          )}
+        >
+          {routeProbeLabel(probe)}
+        </Text>
+      )}
+    </View>
+  );
+}
+
+/** The saved routes of a pairing this device made itself; null for anything else. */
+function useSavedRoutes(environmentId: EnvironmentId) {
+  const entry = useAtomValue(environmentCatalog.catalogValueAtom).entries.get(environmentId);
+  const profile = entry === undefined ? null : Option.getOrNull(entry.profile);
+  return useMemo(
+    () =>
+      profile?._tag === "BearerConnectionProfile"
+        ? {
+            alternateHttpBaseUrls: profile.alternateHttpBaseUrls ?? [],
+            pinnedRoute: profile.pinnedRoute === true,
+          }
+        : null,
+    [profile],
+  );
+}
+
 export function ConnectionEnvironmentRow(props: {
   readonly environment: ConnectedEnvironmentSummary;
   readonly expanded: boolean;
@@ -41,11 +160,20 @@ export function ConnectionEnvironmentRow(props: {
   readonly onSetEnabled: (environmentId: EnvironmentId, enabled: boolean) => void;
   readonly onUpdate: (
     environmentId: EnvironmentId,
-    updates: { readonly label: string; readonly displayUrl: string },
+    updates: EnvironmentUpdateInput,
   ) => Promise<AtomCommandResult<unknown, unknown>>;
 }) {
   const [label, setLabel] = useState(props.environment.environmentLabel);
-  const [url, setUrl] = useState(props.environment.displayUrl);
+  const savedRoutes = useSavedRoutes(props.environment.environmentId);
+  const [routes, setRoutes] = useState<ReadonlyArray<{ id: number; url: string }>>(() =>
+    [props.environment.displayUrl, ...(savedRoutes?.alternateHttpBaseUrls ?? [])].map(newRoute),
+  );
+  const [pinnedRoute, setPinnedRoute] = useState(savedRoutes?.pinnedRoute ?? false);
+  // A multi-route pairing may be connected over an alternate address; show
+  // the one actually in use rather than the saved preferred one.
+  const activeHttpBaseUrl = Option.getOrNull(
+    usePreparedConnection(props.environment.environmentId),
+  )?.httpBaseUrl;
   const serverConfig = useAtomValue(
     serverEnvironment.configValueAtom(props.environment.environmentId),
   );
@@ -60,9 +188,13 @@ export function ConnectionEnvironmentRow(props: {
     (props.environment.connectionState === "connecting" ||
       props.environment.connectionState === "reconnecting");
   const handleSave = useCallback(async () => {
+    const [displayUrl = "", ...alternateHttpBaseUrls] = routes
+      .map((route) => route.url.trim())
+      .filter((route) => route !== "");
     const result = await props.onUpdate(props.environment.environmentId, {
       label: label.trim(),
-      displayUrl: url.trim(),
+      displayUrl,
+      ...(savedRoutes === null ? {} : { alternateHttpBaseUrls, pinnedRoute }),
     });
     if (AsyncResult.isSuccess(result)) {
       props.onToggle();
@@ -73,7 +205,7 @@ export function ConnectionEnvironmentRow(props: {
       "Could not update environment",
       error instanceof Error ? error.message : "The environment could not be updated.",
     );
-  }, [label, url, props]);
+  }, [label, routes, pinnedRoute, savedRoutes, props]);
 
   return (
     <Animated.View layout={LinearTransition.duration(250)} className="bg-card">
@@ -102,7 +234,9 @@ export function ConnectionEnvironmentRow(props: {
             </Text>
           </View>
           <Text className="text-xs text-foreground-muted" numberOfLines={1}>
-            {props.environment.displayUrl}
+            {props.environment.connectionState === "connected" && activeHttpBaseUrl
+              ? activeHttpBaseUrl
+              : props.environment.displayUrl}
           </Text>
           {statusLabel ? (
             <Text
@@ -162,15 +296,52 @@ export function ConnectionEnvironmentRow(props: {
                 onChangeText={setLabel}
               />
 
-              <ConnectionFormField
-                label="URL"
-                autoCapitalize="none"
-                autoCorrect={false}
-                keyboardType="url"
-                placeholder="192.168.1.100:8080"
-                value={url}
-                onChangeText={setUrl}
-              />
+              {routes.map((route, index) => (
+                <RouteField
+                  key={route.id}
+                  url={route.url}
+                  environmentId={props.environment.environmentId}
+                  preferred={index === 0}
+                  removable={routes.length > 1}
+                  onChange={(url) => setRoutes(routes.with(index, { ...route, url }))}
+                  onRemove={() => setRoutes(routes.filter((candidate) => candidate !== route))}
+                />
+              ))}
+              {savedRoutes === null ? null : (
+                <>
+                  {Platform.OS === "android" ? (
+                    <MaterialButton
+                      label="Add URL"
+                      tone="secondary"
+                      onPress={() => setRoutes([...routes, newRoute("")])}
+                    />
+                  ) : (
+                    <Pressable
+                      className="min-h-[42px] flex-row items-center justify-center gap-1.5 rounded-[14px] border border-input-border bg-input px-3.5 py-2.5 active:opacity-70"
+                      onPress={() => setRoutes([...routes, newRoute("")])}
+                    >
+                      <SymbolView
+                        name="plus"
+                        size={13}
+                        tintColorClassName="accent-icon-subtle"
+                        type="monochrome"
+                      />
+                      <Text className="text-xs font-t3-bold tracking-[0.8px] uppercase text-foreground">
+                        Add URL
+                      </Text>
+                    </Pressable>
+                  )}
+                  <View className="flex-row items-center justify-between gap-3">
+                    <View className="flex-1 gap-0.5">
+                      <Text className="text-sm text-foreground">Always use the preferred URL</Text>
+                      <Text className="text-xs text-foreground-muted">
+                        Off dials every address at once and keeps the first one that answers.
+                      </Text>
+                    </View>
+                    <ThemedSwitch value={pinnedRoute} onValueChange={setPinnedRoute} />
+                  </View>
+                </>
+              )}
             </>
           )}
 

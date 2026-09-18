@@ -66,12 +66,16 @@ another link to share.
 
 A machine you sometimes reach over your LAN and sometimes over a tailnet can
 keep both addresses in one saved environment. Pair it again from the other
-address and the earlier address stays saved alongside the new one.
+address, or open its **Edit…** action under **Settings → Connections** on web
+and desktop, or expand it under **Settings → Environments** on mobile, and use
+**Add URL** to add each extra address. Every address is checked from your device
+as you type, so you can see whether it reaches that machine before saving.
 
-When connecting, the client dials every saved address at once and keeps the
-first one that answers as that machine. Threads, credentials, and settings are
-the same over every address, because they belong to the machine rather than the
-route.
+When connecting, the client dials every address at once and keeps the first one
+that answers as that machine. The environment row shows the address in use.
+Switch on **Always use the preferred URL** to stop that and connect only through
+the preferred address. Threads, credentials, and settings are the same over
+every address, because they belong to the machine rather than the route.
 
 ### Balance new threads across machines
 

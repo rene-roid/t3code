@@ -397,6 +397,48 @@ describe("ConnectionResolver", () => {
     }),
   );
 
+  it.effect("a pinned route never probes the alternates and keeps its saved socket URL", () =>
+    Effect.gen(function* () {
+      const requested: Array<string> = [];
+      const wsBaseUrls: Array<string> = [];
+      const brokerLayer = yield* makeDependencies({
+        credentials: [["saved-1", new BearerConnectionCredential({ token: "secret-bearer" })]],
+        authorizeBearer: (input) => {
+          wsBaseUrls.push(input.wsBaseUrl);
+          return Effect.succeed({
+            environmentId: input.expectedEnvironmentId,
+            label: "Saved",
+            httpBaseUrl: input.httpBaseUrl,
+            socketUrl: "wss://lan.example.test/socket?wsTicket=ticket",
+            httpAuthorization: { _tag: "Bearer" as const, token: input.bearerToken },
+          });
+        },
+        fetch: ((input) => {
+          requested.push(new URL(String(input)).origin);
+          return Promise.resolve(descriptorResponse(ENVIRONMENT_ID));
+        }) satisfies typeof fetch,
+      });
+      const broker = yield* ConnectionResolver.ConnectionResolver.pipe(Effect.provide(brokerLayer));
+
+      const prepared = yield* broker.prepare(
+        catalogEntry(
+          ROUTED_TARGET,
+          Option.some(
+            new BearerConnectionProfile({
+              ...ROUTED_PROFILE,
+              wsBaseUrl: "wss://lan.example.test/socket",
+              pinnedRoute: true,
+            }),
+          ),
+        ),
+      );
+
+      expect(prepared.httpBaseUrl).toBe("https://lan.example.test/");
+      expect(new Set(requested)).toEqual(new Set(["https://lan.example.test"]));
+      expect(wsBaseUrls).toEqual(["wss://lan.example.test/socket"]);
+    }),
+  );
+
   it.effect("prepares relay connections with the authorized endpoint and credentials", () =>
     Effect.gen(function* () {
       const target = new RelayConnectionTarget({

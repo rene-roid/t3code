@@ -48,6 +48,10 @@ export interface BearerConnectionUpdateInput {
   readonly environmentId: EnvironmentId;
   readonly label: string;
   readonly httpBaseUrl: string;
+  /** Omitted keeps the saved alternates; an empty list clears them. */
+  readonly alternateHttpBaseUrls?: ReadonlyArray<string>;
+  /** Omitted keeps the saved pin. */
+  readonly pinnedRoute?: boolean;
 }
 
 export class ConnectionOnboarding extends Context.Service<
@@ -138,10 +142,18 @@ export function mergeBearerRoutes(
   const alternateHttpBaseUrls = [
     ...new Set([previousProfile.httpBaseUrl, ...(previousProfile.alternateHttpBaseUrls ?? [])]),
   ].filter((httpBaseUrl) => httpBaseUrl !== registration.profile.httpBaseUrl);
-  if (alternateHttpBaseUrls.length === 0) return registration;
+  if (alternateHttpBaseUrls.length === 0 && previousProfile.pinnedRoute === undefined) {
+    return registration;
+  }
   return new BearerConnectionRegistration({
     ...registration,
-    profile: new BearerConnectionProfile({ ...registration.profile, alternateHttpBaseUrls }),
+    profile: new BearerConnectionProfile({
+      ...registration.profile,
+      ...(alternateHttpBaseUrls.length === 0 ? {} : { alternateHttpBaseUrls }),
+      ...(previousProfile.pinnedRoute === undefined
+        ? {}
+        : { pinnedRoute: previousProfile.pinnedRoute }),
+    }),
   });
 }
 
@@ -212,19 +224,26 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       detail: "Environment label cannot be empty.",
     });
   }
-  const httpBaseUrl = yield* Effect.try({
-    try: () => normalizeHttpBaseUrl(options.input.httpBaseUrl),
-    catch: (cause) =>
-      new ConnectionBlockedError({
-        reason: "configuration",
-        detail: cause instanceof Error ? cause.message : "The environment URL is invalid.",
-      }),
-  });
-  // Editing the preferred address keeps the other saved routes, minus the one
-  // that just became preferred.
-  const alternateHttpBaseUrls = (entry.profile.value.alternateHttpBaseUrls ?? []).filter(
-    (candidate) => candidate !== httpBaseUrl,
-  );
+  const normalizeUrl = (rawValue: string) =>
+    Effect.try({
+      try: () => normalizeHttpBaseUrl(rawValue),
+      catch: (cause) =>
+        new ConnectionBlockedError({
+          reason: "configuration",
+          detail: cause instanceof Error ? cause.message : "The environment URL is invalid.",
+        }),
+    });
+  const httpBaseUrl = yield* normalizeUrl(options.input.httpBaseUrl);
+  const previousProfile = entry.profile.value;
+  const alternateHttpBaseUrls = [
+    ...new Set(
+      yield* Effect.forEach(
+        options.input.alternateHttpBaseUrls ?? previousProfile.alternateHttpBaseUrls ?? [],
+        normalizeUrl,
+      ),
+    ),
+  ].filter((candidate) => candidate !== httpBaseUrl);
+  const pinnedRoute = options.input.pinnedRoute ?? previousProfile.pinnedRoute;
   const connectionId = entry.target.connectionId;
   return new BearerConnectionRegistration({
     target: new BearerConnectionTarget({
@@ -239,6 +258,7 @@ export const prepareBearerConnectionUpdate = Effect.fn(
       httpBaseUrl,
       wsBaseUrl: deriveWsBaseUrl(httpBaseUrl),
       ...(alternateHttpBaseUrls.length === 0 ? {} : { alternateHttpBaseUrls }),
+      ...(pinnedRoute === undefined ? {} : { pinnedRoute }),
     }),
     credential: credential.value,
   });

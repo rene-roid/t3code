@@ -1,8 +1,12 @@
-import { ConnectionOnboarding } from "@t3tools/client-runtime/connection";
+import {
+  type BearerConnectionUpdateInput,
+  ConnectionOnboarding,
+} from "@t3tools/client-runtime/connection";
 import {
   createAtomCommandScheduler,
   createRuntimeCommand,
 } from "@t3tools/client-runtime/state/runtime";
+import { probeEnvironmentRoute } from "@t3tools/client-runtime/environment";
 import type { DesktopSshEnvironmentTarget } from "@t3tools/contracts";
 import * as Effect from "effect/Effect";
 
@@ -24,6 +28,24 @@ export const connectPairing = createRuntimeCommand(connectionAtomRuntime, {
     readonly pairingCode?: string;
   }) =>
     ConnectionOnboarding.pipe(Effect.flatMap((onboarding) => onboarding.registerPairing(input))),
+});
+
+export const updateBearerConnection = createRuntimeCommand(connectionAtomRuntime, {
+  label: "web:connection:update-bearer",
+  scheduler: onboardingScheduler,
+  concurrency: {
+    mode: "serial",
+    key: (input: BearerConnectionUpdateInput) => input.environmentId,
+  },
+  execute: (input: BearerConnectionUpdateInput) =>
+    ConnectionOnboarding.pipe(Effect.flatMap((onboarding) => onboarding.updateBearer(input))),
+});
+
+export const probeRoute = createRuntimeCommand(connectionAtomRuntime, {
+  label: "web:connection:probe-route",
+  scheduler: onboardingScheduler,
+  concurrency: { mode: "parallel" },
+  execute: (input: Parameters<typeof probeEnvironmentRoute>[0]) => probeEnvironmentRoute(input),
 });
 
 export const connectSshEnvironment = createRuntimeCommand(connectionAtomRuntime, {
